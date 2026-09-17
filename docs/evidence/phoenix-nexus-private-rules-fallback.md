@@ -1,0 +1,24 @@
+# Phoenix Nexus private-repository rules fallback — delivery evidence
+
+- repo: `miaworldross-afk/hermes-agent` (fork of `NousResearch/hermes-agent`)
+- local_path: `/home/Athena_Morgan/workspace/hermes-kanban-private-rules-fallback`
+- branch: `phoenix/repair-kanban-private-rules-fallback`
+- implementation_commits: `5fb52e84055583f210044af866f7bde598210ce2`, `a6d06255faaa580404d3c004d3e11911c40f73ea`
+- remote_branch: `fork/phoenix/repair-kanban-private-rules-fallback`
+- active_source_path: `/home/Athena_Morgan/workspace/hermes-athena-update-20260907`
+- active_source_commits: `9b9159e919`, `42884b5112`
+- git_status_short: clean in the delivery worktree before this evidence commit; the active source checkout retains one pre-existing unrelated modification at `apps/desktop/electron/main.ts`, whose diff SHA-256 remained `37395f02cf839396b184be4298e1212a63a26f1c9787ebb4a8ee6ee841f02ca5` before and after deployment.
+- validation_command: `HERMES_PYTHON=/home/Athena_Morgan/workspace/hermes-athena-update-20260907/venv/bin/python ./scripts/run_tests.sh tests/hermes_cli/test_kanban_pr_acceptance.py`
+- validation_result: `27 passed, 0 failed` in both the delivery worktree and active source checkout; independent QA accepted exact commit `a6d06255faaa580404d3c004d3e11911c40f73ea`.
+- lint_command: `/home/Athena_Morgan/workspace/hermes-athena-update-20260907/venv/bin/python -m ruff check hermes_cli/kanban_pr_acceptance.py tests/hermes_cli/test_kanban_pr_acceptance.py`
+- lint_result: passed.
+- diff_check: passed.
+- ci_status: local/fork branch CI not relied upon; focused deterministic tests and independent QA passed. The fork branch was pushed successfully.
+- artifact_check: only verifier source, focused tests, and this evidence document are tracked on the delivery branch; no generated build/cache artifacts were added.
+- secrets_check: no credentials, tokens, passwords, cookies, connection strings, or local environment files were added.
+- configured_policy: exact repository `miaworldross-afk/phoenix-nexus`; required context `Typecheck, lint, test, build`; trusted application ID `15368`.
+- branch_rule_metadata: indeterminate/administratively unavailable. The live endpoint still returns GitHub's private/free-plan HTTP 403. This is not represented as branch-rule success.
+- live_verifier_result: success using `policy_source=configured_repository_fallback` for PR `https://github.com/miaworldross-afk/phoenix-nexus/pull/5`, exact head `0d37657e078ab1412864318fe5479352f1bc3e96`, and completed successful check runs from application ID `15368`.
+- phoenix_nexus_pr_state: open, non-draft, mergeable, clean, exact head `0d37657e078ab1412864318fe5479352f1bc3e96` at verification time.
+- remaining_risks: live GitHub transport is plan-gated and therefore uses the explicit owner-controlled local policy; the Telegram/gateway process refused self-restart; this execution context was denied Kanban mutation as a delegated-child context. No direct database edit or guard bypass was attempted.
+- final_classification: verifier repair implemented, independently accepted, pushed, configured, deployed to active source, and live-probed successfully; operational closure remains blocked only on externally restarting the gateway and retrying Kanban task `t_b4fc84ad` through a mutation-capable root shell/session.
