@@ -21,10 +21,10 @@ def github(tmp_path, monkeypatch):
             state["requests"].append(self.path)
             sha = state["head"]
             if self.path == "/graphql":
-                protection = None if state.get("plan_gated") else {"requiredStatusChecks": [
+                protection = None if state.get("plan_gated") and not state.get("graphql_protection") else {"requiredStatusChecks": [
                     {"context": "required", "app": {"databaseId": 1}}]}
                 value = {"data": {"repository": {"pullRequest": {
-                    "headRefOid": sha, "baseRefName": "main", "state": "OPEN",
+                    "headRefOid": sha, "baseRefName": state.get("base", "main"), "state": "OPEN",
                     "baseRef": {"branchProtectionRule": protection}}}}}
             elif "/rules/branches/" in self.path:
                 if state.get("rules_error"):
@@ -40,6 +40,16 @@ def github(tmp_path, monkeypatch):
                 if state.get("stale"):
                     run["head_sha"] = "b" * 40
                 runs = [] if state.get("missing") else [run]
+                if state.get("duplicate_conclusions"):
+                    runs = [
+                        {
+                            **run,
+                            "id": 42 + index,
+                            "status": "in_progress" if conclusion == "pending" else "completed",
+                            "conclusion": conclusion,
+                        }
+                        for index, conclusion in enumerate(state["duplicate_conclusions"])
+                    ]
                 value = [{"total_count": 100 + len(runs), "check_runs": [
                     {**run, "id": 1000 + i, "name": "optional", "conclusion": "skipped"}
                     for i in range(100)]}, {"total_count": 100 + len(runs), "check_runs": runs}]
@@ -47,10 +57,12 @@ def github(tmp_path, monkeypatch):
                     state["race"]()
                 if state.get("head_change"):
                     state["head"] = "b" * 40
+                if state.get("base_change"):
+                    state["base"] = "release"
             elif "/statuses" in self.path:
                 value = [[]]
             elif "/pulls/" in self.path:
-                value = {"head": {"sha": sha}, "base": {"ref": "main"}, "state": "open"}
+                value = {"head": {"sha": sha}, "base": {"ref": state.get("base", "main")}, "state": "open"}
             else:
                 self.send_error(404)
                 return
@@ -198,6 +210,7 @@ def test_plan_gated_rules_use_only_exact_repository_policy(github, monkeypatch):
         ("cancelled", "infra"),
         ("stale", "stale"),
         ("head_change", "stale"),
+        ("base_change", "stale"),
     ],
 )
 def test_plan_gated_fallback_rejects_every_non_exact_success(github, monkeypatch, mutation, expected):
@@ -223,7 +236,7 @@ def test_plan_gated_fallback_rejects_every_non_exact_success(github, monkeypatch
         github["context"] = "similar-but-not-required"
     elif mutation == "wrong_app":
         github["app_id"] = 999
-    elif mutation in {"missing", "stale", "head_change"}:
+    elif mutation in {"missing", "stale", "head_change", "base_change"}:
         github[mutation] = True
     else:
         github["conclusion"] = mutation
@@ -260,6 +273,30 @@ def test_fallback_rejects_ordinary_or_unrecognized_rules_403(github, monkeypatch
 
 
 @pytest.mark.linux_only
+def test_plan_gated_403_does_not_override_graphql_branch_protection(github, monkeypatch):
+    from hermes_cli import config as config_mod
+
+    monkeypatch.setattr(
+        config_mod,
+        "load_config_readonly",
+        lambda: (_ for _ in ()).throw(AssertionError("fallback config must not be read")),
+    )
+    github.update(
+        plan_gated=True,
+        graphql_protection=True,
+        rules_error="Upgrade to GitHub Pro or make this repository public to enable this feature.",
+        conclusion="success",
+        head="a" * 40,
+    )
+
+    receipt = collect_acceptance("acme/repo", "https://github.com/acme/repo/pull/7")
+
+    assert receipt["ok"] is False
+    assert receipt["classification"] == "infra"
+    assert "policy_source" not in receipt
+
+
+@pytest.mark.linux_only
 def test_authoritative_remote_policy_never_loads_fallback(github, monkeypatch):
     from hermes_cli import config as config_mod
 
@@ -284,7 +321,12 @@ def test_authoritative_remote_policy_never_loads_fallback(github, monkeypatch):
         [{"context": "required", "app_id": None}],
         [{"context": "required"}],
         [{"context": " required", "app_id": 1}],
+        [
+            {"context": "required", "app_id": 1},
+            {"context": "required", "app_id": 1},
+        ],
     ],
+    ids=["empty", "unpinned", "missing-app", "whitespace-context", "duplicate"],
 )
 def test_malformed_or_unpinned_fallback_policy_fails_closed(github, monkeypatch, checks):
     from hermes_cli import config as config_mod
@@ -305,3 +347,48 @@ def test_malformed_or_unpinned_fallback_policy_fails_closed(github, monkeypatch,
 
     assert receipt["ok"] is False
     assert receipt["classification"] == "infra"
+
+
+@pytest.mark.linux_only
+@pytest.mark.parametrize(
+    "config",
+    [
+        "bad",
+        {"kanban": "bad"},
+        {"kanban": {"pr_acceptance": "bad"}},
+        {"kanban": {"pr_acceptance": {"repository_policies": "bad"}}},
+    ],
+    ids=["config", "kanban", "pr-acceptance", "repository-policies"],
+)
+def test_malformed_fallback_parent_containers_fail_closed(github, monkeypatch, config):
+    from hermes_cli import config as config_mod
+
+    monkeypatch.setattr(config_mod, "load_config_readonly", lambda: config)
+    github.update(
+        plan_gated=True,
+        rules_error="Upgrade to GitHub Pro or make this repository public to enable this feature.",
+        conclusion="success",
+        head="a" * 40,
+    )
+
+    receipt = collect_acceptance("acme/repo", "https://github.com/acme/repo/pull/7")
+
+    assert receipt["ok"] is False
+    assert receipt["classification"] == "infra"
+    assert "policy_source" not in receipt
+
+
+@pytest.mark.linux_only
+def test_duplicate_check_runs_require_every_outcome_to_succeed(github):
+    github.update(
+        conclusion="success",
+        duplicate_conclusions=["success", "failure"],
+        head="a" * 40,
+    )
+
+    receipt = collect_acceptance("acme/repo", "https://github.com/acme/repo/pull/7")
+
+    assert receipt["ok"] is False
+    assert receipt["classification"] == "failure"
+    required = [check for check in receipt["checks"] if check["name"] == "required"]
+    assert {check["classification"] for check in required} == {"success", "failure"}

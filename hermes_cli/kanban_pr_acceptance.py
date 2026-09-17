@@ -57,10 +57,16 @@ def _configured_repository_policy(repo: str) -> set[tuple[str, int]] | None:
     from hermes_cli.config import load_config_readonly
 
     config = load_config_readonly()
-    kanban = config.get("kanban") or {}
-    acceptance = kanban.get("pr_acceptance") or {}
-    repositories = acceptance.get("repository_policies") or {}
-    if not all(isinstance(value, dict) for value in (config, kanban, acceptance, repositories)):
+    if not isinstance(config, dict):
+        raise ValueError("Invalid Kanban PR acceptance policy configuration")
+    kanban = config.get("kanban", {})
+    if not isinstance(kanban, dict):
+        raise ValueError("Invalid Kanban PR acceptance policy configuration")
+    acceptance = kanban.get("pr_acceptance", {})
+    if not isinstance(acceptance, dict):
+        raise ValueError("Invalid Kanban PR acceptance policy configuration")
+    repositories = acceptance.get("repository_policies", {})
+    if not isinstance(repositories, dict):
         raise ValueError("Invalid Kanban PR acceptance policy configuration")
     policy = repositories.get(repo)
     if policy is None:
