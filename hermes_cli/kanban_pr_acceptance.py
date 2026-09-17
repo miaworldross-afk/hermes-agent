@@ -13,6 +13,9 @@ from urllib.parse import quote
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
+_PLAN_GATED_RULES_ERROR = (
+    "gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)"
+)
 
 
 def validate_contract(value: str | None) -> str:
@@ -45,6 +48,43 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False):
     return value
 
 
+def _configured_repository_policy(repo: str) -> set[tuple[str, int]] | None:
+    """Return the strict, app-pinned fallback policy for exactly ``repo``.
+
+    This is loaded only after GitHub's precise private/free-plan policy failure.
+    A missing repository entry is not a wildcard; malformed policy fails closed.
+    """
+    from hermes_cli.config import load_config_readonly
+
+    config = load_config_readonly()
+    kanban = config.get("kanban") or {}
+    acceptance = kanban.get("pr_acceptance") or {}
+    repositories = acceptance.get("repository_policies") or {}
+    if not all(isinstance(value, dict) for value in (config, kanban, acceptance, repositories)):
+        raise ValueError("Invalid Kanban PR acceptance policy configuration")
+    policy = repositories.get(repo)
+    if policy is None:
+        return None
+    if not isinstance(policy, dict) or set(policy) != {"required_status_checks"}:
+        raise ValueError("Invalid repository PR acceptance policy")
+    checks = policy["required_status_checks"]
+    if not isinstance(checks, list) or not checks:
+        raise ValueError("Repository PR acceptance policy must require checks")
+    required: set[tuple[str, int]] = set()
+    for check in checks:
+        if not isinstance(check, dict) or set(check) != {"context", "app_id"}:
+            raise ValueError("Each fallback check must contain only context and app_id")
+        context, app_id = check["context"], check["app_id"]
+        if not isinstance(context, str) or not context or context != context.strip():
+            raise ValueError("Fallback check context must be an exact non-empty string")
+        if isinstance(app_id, bool) or not isinstance(app_id, int) or app_id <= 0:
+            raise ValueError("Fallback checks must pin a positive GitHub application id")
+        required.add((context, app_id))
+    if len(required) != len(checks):
+        raise ValueError("Fallback repository policy contains duplicate checks")
+    return required
+
+
 def collect_acceptance(contract: str, published_pr: str | None) -> dict:
     receipt = {"ok": False, "classification": "missing", "head_sha": None,
                "pr_url": published_pr, "checks": [],
@@ -68,9 +108,26 @@ def collect_acceptance(contract: str, published_pr: str | None) -> dict:
         receipt["head_sha"] = sha
         if not re.fullmatch(r"[0-9a-f]{40}", sha) or pr["state"] not in {"OPEN", "MERGED"}:
             raise ValueError("PR is closed or current head is unavailable")
-        protection = (pr.get("baseRef") or {}).get("branchProtectionRule") or {}
-        required = {(r["context"], (r.get("app") or {}).get("databaseId")) for r in protection.get("requiredStatusChecks", [])}
-        rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100", paginate=True)
+        protection = (pr.get("baseRef") or {}).get("branchProtectionRule")
+        required = {(r["context"], (r.get("app") or {}).get("databaseId"))
+                    for r in (protection or {}).get("requiredStatusChecks", [])}
+        try:
+            rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100", paginate=True)
+        except subprocess.CalledProcessError as error:
+            # Only GitHub's exact private/free-plan response, paired with an
+            # unavailable GraphQL rule, may activate owner-controlled policy.
+            if protection is not None or (error.stderr or "").strip() != _PLAN_GATED_RULES_ERROR:
+                raise
+            configured = _configured_repository_policy(repo)
+            if configured is None:
+                receipt["detail"] = (
+                    "GitHub plan limits hide repository-required checks and no configured "
+                    "repository fallback policy exists."
+                )
+                return receipt
+            required = configured
+            rules = []
+            receipt["policy_source"] = "configured_repository_fallback"
         for page in rules:
             for rule in page:
                 if rule["type"] == "required_status_checks":
